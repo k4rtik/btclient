@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::net::SocketAddrV4;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,9 +46,11 @@ impl BTClient {
     }
 
     pub fn add(self: &mut BTClient, file: fs::File) -> Result<(), String> {
-        let (tx, rx) = channel();
         let torrent = Arc::new(Mutex::new(Torrent::new(file, self.peer_id.clone())));
+        // TODO check if torrent already exists before insert
         self.torrents.insert(self.next_id, torrent.clone());
+
+        let (tx, rx) = channel();
         self.channels.insert(self.next_id, tx);
         self.next_id += 1;
 
@@ -77,6 +79,8 @@ impl BTClient {
         trace!("{:?}", tracker_info);
         debug!("Found {} peers", tracker_info.peers.len());
         torrent.tracker_info = Some(tracker_info);
+
+        self.channels[&id].send(Message::StartDownload).unwrap();
     }
 
     pub fn showfiles(self: &BTClient, id: usize) {
@@ -129,13 +133,11 @@ impl Torrent {
         print_metainfo_overview(&metainfo);
 
         let root_name: String;
-        if let Some(dir) = metainfo
-            .info()
+        if let Some(dir) = metainfo.info()
             .directory() {
             root_name = dir.to_owned();
         } else {
-            root_name = metainfo
-                .info()
+            root_name = metainfo.info()
                 .files()
                 .next()
                 .unwrap()
@@ -310,9 +312,17 @@ enum EventType {
 }
 
 fn torrent_loop(rx: Receiver<Message>, torrent: Arc<Mutex<Torrent>>) {
-    debug!("initiating torrent_loop for {:?}", torrent.lock().unwrap().root_name);
+    debug!("initiating torrent_loop for {:?}",
+           torrent.lock().unwrap().root_name);
     loop {
-        let message = rx.recv();
+        let message = rx.recv().unwrap();
         debug!("{:?}", message);
+        use self::Message::*;
+        match message {
+            StartDownload => {
+                info!("starting download");
+            }
+            _ => warn!("NOT YET IMPLEMENTED"),
+        }
     }
 }
