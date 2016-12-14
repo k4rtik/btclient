@@ -108,6 +108,7 @@ struct Torrent {
     piece_bitmap: BitVec,
     block_bitmap: Vec<BitVec>,
 
+    piece_nxt_req: usize,
     uploaded: usize,
     downloaded: usize,
     left: usize,
@@ -169,6 +170,8 @@ impl Torrent {
 
             piece_bitmap: BitVec::from_elem(piece_count, false),
             block_bitmap: Vec::new(),
+
+            piece_nxt_req: 0,
 
             uploaded: 0,
             downloaded: 0,
@@ -232,6 +235,22 @@ impl Torrent {
             peers: peers,
             interval: interval,
             tracker_id: None,
+        }
+    }
+
+    fn get_block_num(self: &mut Torrent, piece_num: usize) -> Result<usize, String> {
+        let block = &self.block_bitmap[piece_num];
+        let pos = block.iter().position(|x| !x).unwrap();
+        Ok(pos)
+    }
+
+    fn get_piece_num(self: &mut Torrent) -> Result<usize, String> {
+        if self.piece_nxt_req <= self.metainfo.info().pieces().count() {
+            let piece_num = self.piece_nxt_req;
+            self.piece_nxt_req += 1;
+            Ok(piece_num)
+        } else {
+            Err("No more pieces to request!".to_owned())
         }
     }
 }
