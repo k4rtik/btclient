@@ -80,11 +80,12 @@ help/h                           - show this help");
                         if line.len() != 1 {
                             error!("usage: list");
                         } else {
-                            let t_list = btclient.list();
+                            let mut torrent_list = btclient.list();
+                            torrent_list.sort_by_key(|te| te.0);
                             println!("ID  Torrent");
                             println!("--  ----------------------------------------------");
-                            for t in t_list {
-                                println!("{:2}  {}", t.0, t.1);
+                            for (id, root_name) in torrent_list {
+                                println!("{:2}  {}", id, root_name);
                             }
                         }
                     }
