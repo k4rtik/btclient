@@ -56,6 +56,31 @@ impl BTClient {
                            (t.metainfo.info().pieces().count() as usize);
 
         t.block_bitmap.append(&mut vec![BitVec::from_elem(BLOCK_SZ, false); total_blocks]);
+
+        let mut files = Vec::new();
+        let mut pos: i64 = 0;
+        for file in t.metainfo.info().files() {
+            let length = file.length();
+            let begin = pos;
+            let end = begin + length;
+            pos = end + 1;
+            let piece_begin = (begin / piece_len) as i64;
+            let offset_begin = begin % piece_len;
+            let piece_end = (end / piece_len) as i64;
+            let offset_end = end % piece_len;
+
+            let file = FileT {
+                name: file.paths().next().unwrap_or("<unknown>").to_string(),
+                start_piece: piece_begin as usize,
+                start_offset: offset_begin,
+                end_piece: piece_end as usize,
+                end_offset: offset_end,
+            };
+            debug!("File: {:?}", file);
+            files.push(file);
+        }
+
+        t.files.append(&mut files);
         let torrent = Arc::new(Mutex::new(t));
 
         self.torrents.insert(self.next_id, torrent.clone());
@@ -108,6 +133,7 @@ struct Torrent {
     piece_bitmap: BitVec,
     block_bitmap: Vec<BitVec>,
 
+    files: Vec<FileT>,
     piece_nxt_req: usize,
     uploaded: usize,
     downloaded: usize,
@@ -172,7 +198,7 @@ impl Torrent {
             block_bitmap: Vec::new(),
 
             piece_nxt_req: 0,
-
+            files: Vec::new(),
             uploaded: 0,
             downloaded: 0,
             left: left_bytes as usize,
@@ -297,6 +323,16 @@ fn print_file_list(metainfo: &MetainfoFile) {
                  file.length(),
                  file.paths().next().unwrap_or("<unknown>"));
     }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct FileT {
+    name: String,
+    start_piece: usize,
+    start_offset: i64,
+    end_piece: usize,
+    end_offset: i64,
 }
 
 #[allow(dead_code)]
