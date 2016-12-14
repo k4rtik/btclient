@@ -20,6 +20,8 @@ use std::sync::mpsc::{channel, Sender, Receiver};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const BLOCK_SZ: usize = 16384;
+
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct BTClient {
@@ -46,8 +48,17 @@ impl BTClient {
     }
 
     pub fn add(self: &mut BTClient, file: fs::File) -> Result<(), String> {
-        let torrent = Arc::new(Mutex::new(Torrent::new(file, self.peer_id.clone())));
         // TODO check if torrent already exists before insert
+        let (tx, rx) = channel();
+        let mut t = Torrent::new(file, self.peer_id.clone());
+        let piece_len = t.metainfo.info().piece_length();
+        let blocks_count_per_piece = (piece_len as usize) / BLOCK_SZ;
+        let total_blocks = (blocks_count_per_piece as usize) *
+                           (t.metainfo.info().pieces().count() as usize);
+
+        t.block_bitmap.append(&mut vec![BitVec::from_elem(BLOCK_SZ, false); total_blocks]);
+        let torrent = Arc::new(Mutex::new(t));
+
         self.torrents.insert(self.next_id, torrent.clone());
 
         let (tx, rx) = channel();
@@ -96,6 +107,8 @@ struct Torrent {
     peer_id: String,
 
     piece_bitmap: BitVec,
+    block_bitmap: Vec<BitVec>,
+
     uploaded: usize,
     downloaded: usize,
     left: usize,
@@ -156,6 +169,8 @@ impl Torrent {
             root_name: root_name,
 
             piece_bitmap: BitVec::from_elem(piece_count, false),
+            block_bitmap: Vec::new(),
+
             uploaded: 0,
             downloaded: 0,
             left: left_bytes as usize,
