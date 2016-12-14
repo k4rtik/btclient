@@ -97,6 +97,11 @@ impl BTClient {
         debug!("tracker_info: {:?}", tracker_info);
         (*self.torrents[&id].borrow_mut()).tracker_info = Some(tracker_info);
     }
+
+    pub fn showfiles(self: &BTClient, id: usize) {
+        let torrent = &self.torrents[&id];
+        print_file_list(&torrent.borrow().metainfo);
+    }
 }
 
 #[derive(Debug)]

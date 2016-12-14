@@ -93,7 +93,8 @@ help/h                           - show this help");
                         if line.len() != 2 {
                             error!("usage: showfiles <torrent id>");
                         } else {
-                            // TODO call a btclient fn
+                            let id = line[1].parse::<usize>().unwrap();
+                            btclient.showfiles(id);
                         }
                     }
                     "download" | "d" => {
