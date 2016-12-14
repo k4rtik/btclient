@@ -1,28 +1,36 @@
 extern crate bip_metainfo;
+extern crate bip_bencode;
+extern crate bip_utracker;
 extern crate bit_vec;
 extern crate chrono;
+extern crate hyper;
 extern crate url;
 
 use self::bip_metainfo::MetainfoFile;
+use self::bip_utracker::contact::CompactPeersV4;
 use self::bit_vec::BitVec;
 use self::chrono::TimeZone;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Read;
 use std::fs;
+use std::io::Read;
+use std::net::SocketAddrV4;
 use std::sync::mpsc::Sender;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct BTClient {
-    torrents: HashMap<usize, Torrent>,
+    torrents: HashMap<usize, RefCell<Torrent>>,
     peer_id: String, // peer_id or client id
+    port: u16, // between 6881-6889
     next_id: usize,
     channels: HashMap<usize, Sender<Message>>,
 }
 
 impl BTClient {
-    pub fn new() -> BTClient {
+    pub fn new(port: u16) -> BTClient {
         let now = SystemTime::now();
         let duration = now.duration_since(UNIX_EPOCH).unwrap();
         let peer_id = "-bittorrent-rs-".to_owned() + &format!("{}", duration.as_secs() % 100_000);
@@ -30,6 +38,7 @@ impl BTClient {
         BTClient {
             torrents: HashMap::new(),
             peer_id: peer_id,
+            port: port,
             next_id: 0,
             channels: HashMap::new(),
         }
@@ -37,7 +46,7 @@ impl BTClient {
 
     pub fn add(self: &mut BTClient, file: fs::File) -> Result<(), String> {
         // let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(1);
-        let torrent = Torrent::new(file);
+        let torrent = RefCell::new(Torrent::new(file));
         // let t_clone = torrent.clone();
         self.torrents.insert(self.next_id, torrent);
         // self.channels.insert(self.next_id, tx);
@@ -60,12 +69,14 @@ impl BTClient {
             .map(|(id, torrent)| {
                 // let torrent = &(*(torrent.read().unwrap()));
                 let root_name: String;
-                if let Some(dir) = torrent.metainfo
+                if let Some(dir) = torrent.borrow()
+                    .metainfo
                     .info()
                     .directory() {
                     root_name = dir.to_owned();
                 } else {
-                    root_name = torrent.metainfo
+                    root_name = torrent.borrow()
+                        .metainfo
                         .info()
                         .files()
                         .next()
@@ -80,28 +91,37 @@ impl BTClient {
             .collect()
     }
 
-    pub fn get_id(self: &BTClient) -> String {
-        self.peer_id.clone()
+    pub fn start_download(self: &BTClient, id: usize) {
+        let torrent = &self.torrents[&id];
+        let tracker_info = torrent.borrow().contact_tracker(self.peer_id.clone(), self.port);
+        debug!("tracker_info: {:?}", tracker_info);
+        (*self.torrents[&id].borrow_mut()).tracker_info = Some(tracker_info);
     }
 }
 
-pub struct Torrent {
+#[derive(Debug)]
+struct Torrent {
     metainfo: MetainfoFile,
+    piece_bitmap: BitVec,
 
-    // From/For tracker
-    pub peers: Vec<Peer>,
-    pub uploaded: usize,
-    pub downloaded: usize,
-    pub left: usize,
-    pub interval: usize, // in seconds
-    pub tracker_id: String,
-    pub num_seeders: usize,
-    pub num_leachers: usize,
-    pub piece_bitmap: BitVec,
+    tracker_info: Option<TrackerInfo>,
+}
+
+// From/For tracker
+#[derive(Debug)]
+struct TrackerInfo {
+    peers: Vec<Peer>,
+    uploaded: usize,
+    downloaded: usize,
+    left: usize,
+    interval: usize, // in seconds
+    tracker_id: Option<String>,
+    num_seeders: usize,
+    num_leachers: usize,
 }
 
 #[allow(dead_code)]
-pub enum Message {
+enum Message {
     StartDownload,
     StartSeed,
     StopDownload,
@@ -110,7 +130,7 @@ pub enum Message {
 }
 
 impl Torrent {
-    pub fn new(mut file: fs::File) -> Torrent {
+    fn new(mut file: fs::File) -> Torrent {
         // byte vector for metainfo storage
         let mut bytes: Vec<u8> = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -122,16 +142,75 @@ impl Torrent {
         let piece_count = metainfo.info().pieces().count();
         Torrent {
             metainfo: metainfo,
+            piece_bitmap: BitVec::from_elem(piece_count, false),
 
-            peers: Vec::new(),
-            uploaded: 0,
-            downloaded: 0,
-            left: 0,
-            interval: 0, // in seconds
-            tracker_id: String::new(),
+            tracker_info: None,
+        }
+    }
+
+    fn contact_tracker(self: &Torrent, peer_id: String, port: u16) -> TrackerInfo {
+        let metainfo = &self.metainfo;
+        let info_hash = metainfo.info_hash();
+        let info_hash_str = unsafe { ::std::str::from_utf8_unchecked(info_hash.as_ref()) };
+
+        // TODO parametrize these
+        let uploaded = 0;
+        let downloaded = 0;
+        // TODO this needs to be calculated based on what we have
+        let left_bytes = metainfo.info().files().fold(0, |acc, nex| acc + nex.length());
+
+        let mut request_url = url::Url::parse(metainfo.main_tracker().unwrap()).unwrap();
+        request_url.query_pairs_mut()
+            .append_pair("info_hash", info_hash_str)
+            .append_pair("peer_id", &peer_id)
+            .append_pair("port", &port.to_string())
+            .append_pair("uploaded", &uploaded.to_string())
+            .append_pair("downloaded", &downloaded.to_string())
+            .append_pair("left", &left_bytes.to_string())
+            .append_pair("compact", "1")
+            .append_pair("event", "started")
+            .append_pair("supportcrypto", "0");
+        trace!("Request URL {:?}", request_url);
+
+        let client = hyper::client::Client::new();
+        let mut http_resp =
+            client.get(request_url).header(hyper::header::Connection::close()).send().unwrap();
+        debug!("{:?}", http_resp);
+
+        let mut buffer = Vec::new();
+        http_resp.read_to_end(&mut buffer).unwrap();
+        let response = bip_bencode::Bencode::decode(&buffer).unwrap();
+        debug!("{:?}", response);
+
+        let (_, peer_ip_ports) = CompactPeersV4::from_bytes(response.dict()
+                .unwrap()
+                .lookup("peers")
+                .unwrap()
+                .bytes()
+                .unwrap())
+            .unwrap();
+        trace!("{:?}", peer_ip_ports);
+
+        let mut peers = Vec::new();
+        trace!("Peer list received:");
+        for ip_port in peer_ip_ports.iter() {
+            trace!("{:?}", ip_port);
+            peers.push(Peer::new(ip_port));
+        }
+
+        let interval = response.dict().unwrap().lookup("interval").unwrap();
+        debug!("interval: {:?}", interval);
+        let interval: usize = 100;
+
+        TrackerInfo {
+            peers: peers,
+            uploaded: uploaded,
+            downloaded: uploaded,
+            left: left_bytes as usize,
+            interval: interval,
+            tracker_id: None,
             num_seeders: 0,
             num_leachers: 0,
-            piece_bitmap: BitVec::from_elem(piece_count, false),
         }
     }
 }
@@ -151,7 +230,8 @@ fn print_metainfo_overview(metainfo: &MetainfoFile) {
     println!("------Metainfo File Overview-----");
 
     println!("InfoHash: {}", info_hash_hex);
-    println!("Main Tracker: {}", metainfo.main_tracker().unwrap_or("<missing>"));
+    println!("Main Tracker: {}",
+             metainfo.main_tracker().unwrap_or("<missing>"));
     println!("Comment: {}", metainfo.comment().unwrap_or("<missing>"));
     println!("Creator: {}", metainfo.created_by().unwrap_or("None"));
     println!("Creation Date: {:?}", utc_creation_date);
@@ -179,11 +259,11 @@ fn print_file_list(metainfo: &MetainfoFile) {
     }
 }
 
-
 #[allow(dead_code)]
-pub struct Peer {
-    id: String, // peer_id
-    ip_port: String,
+#[derive(Debug)]
+struct Peer {
+    id: Option<String>, // peer_id
+    ip_port: SocketAddrV4,
 
     am_choking: bool,
     peer_choking: bool,
@@ -192,9 +272,9 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(id: String, ip_port: String) -> Peer {
+    fn new(ip_port: SocketAddrV4) -> Peer {
         Peer {
-            id: id,
+            id: None,
             ip_port: ip_port,
             am_choking: true,
             am_interested: false,
@@ -205,6 +285,7 @@ impl Peer {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct TrackerRequest {
     info_hash: String,
     peer_id: String,
@@ -216,6 +297,7 @@ struct TrackerRequest {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 enum EventType {
     Started,
     Stopped,

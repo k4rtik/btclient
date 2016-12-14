@@ -24,10 +24,10 @@ fn main() {
         .arg(clap::Arg::with_name("port").required(true).index(1).help("e.g.: 6881"))
         .get_matches();
 
-    let port = matches.value_of("port").unwrap();
+    let port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
     info!("port: {}", port);
 
-    let mut btclient = BTClient::new();
+    let mut btclient = BTClient::new(port);
 
     let config = rustyline::Config::builder()
         .history_ignore_space(true)
@@ -99,7 +99,8 @@ help/h                           - show this help");
                         if line.len() != 2 {
                             error!("usage: download <torrent id>");
                         } else {
-                            // TODO call a btclient fn
+                            let id = line[1].parse::<usize>().unwrap();
+                            btclient.start_download(id);
                         }
                     }
                     "seed" | "s" => {
