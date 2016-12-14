@@ -11,18 +11,19 @@ use self::bip_utracker::contact::CompactPeersV4;
 use self::bit_vec::BitVec;
 use self::chrono::TimeZone;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::net::SocketAddrV4;
-use std::sync::mpsc::Sender;
+use std::sync::{Arc,Mutex};
+use std::sync::mpsc::{channel, Sender, Receiver};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct BTClient {
-    torrents: HashMap<usize, RefCell<Torrent>>,
+    torrents: HashMap<usize, Arc<Mutex<Torrent>>>,
     peer_id: String, // peer_id or client id
     port: u16, // between 6881-6889
     next_id: usize,
@@ -45,16 +46,13 @@ impl BTClient {
     }
 
     pub fn add(self: &mut BTClient, file: fs::File) -> Result<(), String> {
-        // let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(1);
-        let torrent = RefCell::new(Torrent::new(file));
-        // let t_clone = torrent.clone();
-        self.torrents.insert(self.next_id, torrent);
-        // self.channels.insert(self.next_id, tx);
+        let (tx, rx) = channel();
+        let torrent = Arc::new(Mutex::new(Torrent::new(file, self.peer_id.clone())));
+        self.torrents.insert(self.next_id, torrent.clone());
+        self.channels.insert(self.next_id, tx);
         self.next_id += 1;
 
-        // let peer_id = self.id.clone();
-
-        // thread::spawn(move || torrent_loop(rx, t_clone, peer_id));
+        thread::spawn(move || torrent_loop(rx, torrent));
         Ok(())
     }
 
@@ -67,49 +65,33 @@ impl BTClient {
         self.torrents
             .iter()
             .map(|(id, torrent)| {
-                // let torrent = &(*(torrent.read().unwrap()));
-                let root_name: String;
-                if let Some(dir) = torrent.borrow()
-                    .metainfo
-                    .info()
-                    .directory() {
-                    root_name = dir.to_owned();
-                } else {
-                    root_name = torrent.borrow()
-                        .metainfo
-                        .info()
-                        .files()
-                        .next()
-                        .unwrap()
-                        .paths()
-                        .next()
-                        .unwrap()
-                        .to_owned();
-                }
-                (*id, root_name)
+                let torrent = torrent.lock().unwrap();
+                (*id, torrent.root_name.clone())
             })
             .collect()
     }
 
     pub fn start_download(self: &BTClient, id: usize) {
-        let torrent = &self.torrents[&id];
-        let tracker_info = torrent.borrow().contact_tracker(self.peer_id.clone(), self.port);
+        let mut torrent = self.torrents[&id].lock().unwrap();
+        let tracker_info = torrent.contact_tracker(self.port);
         trace!("{:?}", tracker_info);
         debug!("Found {} peers", tracker_info.peers.len());
-        (*self.torrents[&id].borrow_mut()).tracker_info = Some(tracker_info);
+        torrent.tracker_info = Some(tracker_info);
     }
 
     pub fn showfiles(self: &BTClient, id: usize) {
-        let torrent = &self.torrents[&id];
-        print_file_list(&torrent.borrow().metainfo);
+        let torrent = self.torrents[&id].lock().unwrap();
+        print_file_list(&torrent.metainfo);
     }
 }
 
 #[derive(Debug)]
 struct Torrent {
     metainfo: MetainfoFile,
-    piece_bitmap: BitVec,
+    root_name: String,
+    peer_id: String,
 
+    piece_bitmap: BitVec,
     uploaded: usize,
     downloaded: usize,
     left: usize,
@@ -127,6 +109,7 @@ struct TrackerInfo {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 enum Message {
     StartDownload,
     StartSeed,
@@ -136,7 +119,7 @@ enum Message {
 }
 
 impl Torrent {
-    fn new(mut file: fs::File) -> Torrent {
+    fn new(mut file: fs::File, peer_id: String) -> Torrent {
         // byte vector for metainfo storage
         let mut bytes: Vec<u8> = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -144,12 +127,33 @@ impl Torrent {
         let metainfo = MetainfoFile::from_bytes(bytes).unwrap();
         // TODO consider making this optional
         print_metainfo_overview(&metainfo);
-        let left_bytes = metainfo.info().files().fold(0, |acc, nex| acc + nex.length());
+
+        let root_name: String;
+        if let Some(dir) = metainfo
+            .info()
+            .directory() {
+            root_name = dir.to_owned();
+        } else {
+            root_name = metainfo
+                .info()
+                .files()
+                .next()
+                .unwrap()
+                .paths()
+                .next()
+                .unwrap()
+                .to_owned();
+        }
+
         let piece_count = metainfo.info().pieces().count();
+        let left_bytes = metainfo.info().files().fold(0, |acc, nex| acc + nex.length());
+
         Torrent {
             metainfo: metainfo,
-            piece_bitmap: BitVec::from_elem(piece_count, false),
+            peer_id: peer_id,
+            root_name: root_name,
 
+            piece_bitmap: BitVec::from_elem(piece_count, false),
             uploaded: 0,
             downloaded: 0,
             left: left_bytes as usize,
@@ -160,7 +164,7 @@ impl Torrent {
         }
     }
 
-    fn contact_tracker(self: &Torrent, peer_id: String, port: u16) -> TrackerInfo {
+    fn contact_tracker(self: &Torrent, port: u16) -> TrackerInfo {
         let metainfo = &self.metainfo;
         let info_hash = metainfo.info_hash();
         let info_hash_str = unsafe { ::std::str::from_utf8_unchecked(info_hash.as_ref()) };
@@ -168,7 +172,7 @@ impl Torrent {
         let mut request_url = url::Url::parse(metainfo.main_tracker().unwrap()).unwrap();
         request_url.query_pairs_mut()
             .append_pair("info_hash", info_hash_str)
-            .append_pair("peer_id", &peer_id)
+            .append_pair("peer_id", &self.peer_id)
             .append_pair("port", &port.to_string())
             .append_pair("uploaded", &self.uploaded.to_string())
             .append_pair("downloaded", &self.downloaded.to_string())
@@ -303,4 +307,12 @@ enum EventType {
     Started,
     Stopped,
     Completed,
+}
+
+fn torrent_loop(rx: Receiver<Message>, torrent: Arc<Mutex<Torrent>>) {
+    debug!("initiating torrent_loop for {:?}", torrent.lock().unwrap().root_name);
+    loop {
+        let message = rx.recv();
+        debug!("{:?}", message);
+    }
 }
