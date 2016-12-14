@@ -94,7 +94,8 @@ impl BTClient {
     pub fn start_download(self: &BTClient, id: usize) {
         let torrent = &self.torrents[&id];
         let tracker_info = torrent.borrow().contact_tracker(self.peer_id.clone(), self.port);
-        debug!("tracker_info: {:?}", tracker_info);
+        trace!("{:?}", tracker_info);
+        debug!("Found {} peers", tracker_info.peers.len());
         (*self.torrents[&id].borrow_mut()).tracker_info = Some(tracker_info);
     }
 
@@ -109,20 +110,20 @@ struct Torrent {
     metainfo: MetainfoFile,
     piece_bitmap: BitVec,
 
-    tracker_info: Option<TrackerInfo>,
-}
-
-// From/For tracker
-#[derive(Debug)]
-struct TrackerInfo {
-    peers: Vec<Peer>,
     uploaded: usize,
     downloaded: usize,
     left: usize,
-    interval: usize, // in seconds
-    tracker_id: Option<String>,
     num_seeders: usize,
     num_leachers: usize,
+
+    tracker_info: Option<TrackerInfo>,
+}
+
+#[derive(Debug)]
+struct TrackerInfo {
+    peers: Vec<Peer>,
+    interval: usize, // in seconds
+    tracker_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -143,11 +144,17 @@ impl Torrent {
         let metainfo = MetainfoFile::from_bytes(bytes).unwrap();
         // TODO consider making this optional
         print_metainfo_overview(&metainfo);
-
+        let left_bytes = metainfo.info().files().fold(0, |acc, nex| acc + nex.length());
         let piece_count = metainfo.info().pieces().count();
         Torrent {
             metainfo: metainfo,
             piece_bitmap: BitVec::from_elem(piece_count, false),
+
+            uploaded: 0,
+            downloaded: 0,
+            left: left_bytes as usize,
+            num_seeders: 0,
+            num_leachers: 0,
 
             tracker_info: None,
         }
@@ -158,20 +165,14 @@ impl Torrent {
         let info_hash = metainfo.info_hash();
         let info_hash_str = unsafe { ::std::str::from_utf8_unchecked(info_hash.as_ref()) };
 
-        // TODO parametrize these
-        let uploaded = 0;
-        let downloaded = 0;
-        // TODO this needs to be calculated based on what we have
-        let left_bytes = metainfo.info().files().fold(0, |acc, nex| acc + nex.length());
-
         let mut request_url = url::Url::parse(metainfo.main_tracker().unwrap()).unwrap();
         request_url.query_pairs_mut()
             .append_pair("info_hash", info_hash_str)
             .append_pair("peer_id", &peer_id)
             .append_pair("port", &port.to_string())
-            .append_pair("uploaded", &uploaded.to_string())
-            .append_pair("downloaded", &downloaded.to_string())
-            .append_pair("left", &left_bytes.to_string())
+            .append_pair("uploaded", &self.uploaded.to_string())
+            .append_pair("downloaded", &self.downloaded.to_string())
+            .append_pair("left", &self.left.to_string())
             .append_pair("compact", "1")
             .append_pair("event", "started")
             .append_pair("supportcrypto", "0");
@@ -180,12 +181,12 @@ impl Torrent {
         let client = hyper::client::Client::new();
         let mut http_resp =
             client.get(request_url).header(hyper::header::Connection::close()).send().unwrap();
-        debug!("{:?}", http_resp);
+        trace!("{:?}", http_resp);
 
         let mut buffer = Vec::new();
         http_resp.read_to_end(&mut buffer).unwrap();
         let response = bip_bencode::Bencode::decode(&buffer).unwrap();
-        debug!("{:?}", response);
+        trace!("{:?}", response);
 
         let (_, peer_ip_ports) = CompactPeersV4::from_bytes(response.dict()
                 .unwrap()
@@ -204,18 +205,13 @@ impl Torrent {
         }
 
         let interval = response.dict().unwrap().lookup("interval").unwrap();
-        debug!("interval: {:?}", interval);
+        trace!("interval: {:?}", interval);
         let interval: usize = 100;
 
         TrackerInfo {
             peers: peers,
-            uploaded: uploaded,
-            downloaded: uploaded,
-            left: left_bytes as usize,
             interval: interval,
             tracker_id: None,
-            num_seeders: 0,
-            num_leachers: 0,
         }
     }
 }
