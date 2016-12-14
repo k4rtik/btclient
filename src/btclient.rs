@@ -49,7 +49,6 @@ impl BTClient {
 
     pub fn add(self: &mut BTClient, file: fs::File) -> Result<(), String> {
         // TODO check if torrent already exists before insert
-        let (tx, rx) = channel();
         let mut t = Torrent::new(file, self.peer_id.clone());
         let piece_len = t.metainfo.info().piece_length();
         let blocks_count_per_piece = (piece_len as usize) / BLOCK_SZ;
