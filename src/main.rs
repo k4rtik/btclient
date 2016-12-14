@@ -2,6 +2,8 @@
 extern crate log;
 
 extern crate clap;
+extern crate pnet;
+extern crate pnet_macros_support;
 extern crate pretty_env_logger;
 extern crate rustyline;
 
@@ -9,7 +11,7 @@ use rustyline::completion::FilenameCompleter;
 use rustyline::error::ReadlineError;
 
 mod btclient;
-
+mod packet;
 use btclient::BTClient;
 
 const HISTORY_FILE: &'static str = ".rustyline_history";

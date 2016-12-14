@@ -29,7 +29,7 @@ pub struct BTClient {
     peer_id: String, // peer_id or client id
     port: u16, // between 6881-6889
     next_id: usize,
-    channels: HashMap<usize, Sender<Message>>,
+    channels: HashMap<usize, Sender<Command>>,
 }
 
 impl BTClient {
@@ -90,7 +90,7 @@ impl BTClient {
         debug!("Found {} peers", tracker_info.peers.len());
         torrent.tracker_info = Some(tracker_info);
 
-        self.channels[&id].send(Message::StartDownload).unwrap();
+        self.channels[&id].send(Command::StartDownload).unwrap();
     }
 
     pub fn showfiles(self: &BTClient, id: usize) {
@@ -126,7 +126,7 @@ struct TrackerInfo {
 
 #[allow(dead_code)]
 #[derive(Debug)]
-enum Message {
+enum Command {
     StartDownload,
     StartSeed,
     StopDownload,
@@ -325,13 +325,13 @@ enum EventType {
     Completed,
 }
 
-fn torrent_loop(rx: Receiver<Message>, torrent: Arc<Mutex<Torrent>>) {
+fn torrent_loop(rx: Receiver<Command>, torrent: Arc<Mutex<Torrent>>) {
     debug!("initiating torrent_loop for {:?}",
            torrent.lock().unwrap().root_name);
     loop {
         let message = rx.recv().unwrap();
         debug!("{:?}", message);
-        use self::Message::*;
+        use self::Command::*;
         match message {
             StartDownload => {
                 info!("starting download");

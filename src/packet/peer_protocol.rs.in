@@ -1,0 +1,94 @@
+use pnet_macros_support::types::*;
+
+#[packet]
+pub struct Handshake {
+    pstrlen: u8,
+    #[length = "pstrlen"]
+    pstr: Vec<u8>,
+    #[length = "8"]
+    reserved: Vec<u8>,
+    #[length = "20"]
+    info_hash: Vec<u8>,
+    #[length = "20"]
+    peer_id: Vec<u8>,
+    #[payload]
+    #[length = "0"]
+    payload: Vec<u8>,
+}
+
+// NOTE: the following messages are hard coded outside of this module
+//  - keep-alive (1-byte message with field len = 0)
+
+/// Control messages are choke/unchoke and interest/not interested
+#[packet]
+pub struct Control {
+    len: u32be, // will always be 1
+    id: u8, // only between 0-3
+    #[payload]
+    #[length = "0"]
+    payload: Vec<u8>,
+}
+
+#[packet]
+pub struct Have {
+    len: u32be, // 5
+    id: u8, // 4
+    piece_index: u32be,
+    #[payload]
+    #[length = "0"]
+    payload: Vec<u8>,
+}
+
+#[packet]
+pub struct BitField {
+    len: u32be, // 1 + X
+    id: u8, // 5
+    #[payload]
+    #[length = "len-1"]
+    payload: Vec<u8>, // bitfield
+}
+
+#[packet]
+pub struct Request {
+    len: u32be, // 13
+    id: u8, // 6
+    index: u32be, // piece index
+    begin: u32be, // byte offset within the piece
+    length: u32be, // requested length
+    #[payload]
+    #[length = "0"]
+    payload: Vec<u8>,
+}
+
+#[packet]
+pub struct Piece {
+    len: u32be, // 9 + X
+    id: u8, // 7
+    index: u32be,
+    begin: u32be,
+    #[payload]
+    #[length = "len-9"]
+    payload: Vec<u8>, // block
+}
+
+#[packet]
+pub struct Cancel {
+    len: u32be, // 13
+    id: u8, // 8
+    index: u32be,
+    begin: u32be,
+    length: u32be,
+    #[payload]
+    #[length = "0"]
+    payload: Vec<u8>,
+}
+
+#[packet]
+pub struct Port {
+    len: u32be, // 3
+    id: u8, // 9
+    listen_port: u32be,
+    #[payload]
+    #[length = "0"]
+    payload: Vec<u8>,
+}
