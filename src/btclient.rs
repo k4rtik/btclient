@@ -69,7 +69,7 @@ impl BTClient {
         for file in t.metainfo.info().files() {
             let length = file.length();
             let begin = pos;
-            let end = begin + length;
+            let end = begin + length - 1;
             pos = end + 1;
             let piece_begin = (begin / piece_len) as i64;
             let offset_begin = begin % piece_len;
