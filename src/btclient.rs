@@ -5,33 +5,37 @@ extern crate bit_vec;
 extern crate chrono;
 extern crate hyper;
 extern crate url;
+extern crate slab;
 
 use self::bip_metainfo::MetainfoFile;
 use self::bip_utracker::contact::CompactPeersV4;
 use self::bit_vec::BitVec;
 use self::chrono::TimeZone;
 
+use mio::*;
+use mio::channel::{Sender, Receiver, channel};
+use mio::tcp::*;
 use pnet::packet::Packet;
 
 use packet::peer_protocol::*;
+use connection::Connection;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs;
 use std::fs::File;
+use std::io;
 use std::io::prelude::*;
 use std::net::SocketAddrV4;
 use std::net::TcpStream;
 use std::str;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{channel, Sender, Receiver};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
+type Slab<T> = slab::Slab<T, Token>;
 const BLOCK_SZ: usize = 16384;
 
 #[allow(dead_code)]
-#[derive(Debug)]
 pub struct BTClient {
     torrents: HashMap<usize, Arc<Mutex<Torrent>>>,
     peer_id: String, // peer_id or client id
@@ -55,9 +59,10 @@ impl BTClient {
         }
     }
 
-    pub fn add(self: &mut BTClient, file: fs::File) -> Result<(), String> {
+    pub fn add(self: &mut BTClient, file: File) -> Result<(), String> {
         // TODO check if torrent already exists before insert
-        let mut t = Torrent::new(file, self.peer_id.clone());
+        let (tx, rx) = channel();
+        let mut t = Torrent::new(file, self.peer_id.clone(), rx);
         let piece_len = t.metainfo.info().piece_length();
         let blocks_count_per_piece = (piece_len as usize) / BLOCK_SZ;
         let total_blocks = (blocks_count_per_piece as usize) *
@@ -93,11 +98,10 @@ impl BTClient {
 
         self.torrents.insert(self.next_id, torrent.clone());
 
-        let (tx, rx) = channel();
         self.channels.insert(self.next_id, tx);
         self.next_id += 1;
 
-        thread::spawn(move || torrent_loop(rx, torrent));
+        thread::spawn(move || torrent_loop(torrent));
         Ok(())
     }
 
@@ -117,13 +121,7 @@ impl BTClient {
     }
 
     pub fn start_download(self: &BTClient, id: usize) {
-        let mut torrent = self.torrents[&id].lock().unwrap();
-        let tracker_info = torrent.contact_tracker(self.port);
-        trace!("{:?}", tracker_info);
-        debug!("Found {} peers", tracker_info.peers.len());
-        *torrent.tracker_info.borrow_mut() = tracker_info;
-
-	//torrent.create_files();
+        self.channels[&id].send(Command::ContactTracker).unwrap();
         self.channels[&id].send(Command::StartDownload).unwrap();
     }
 
@@ -133,7 +131,6 @@ impl BTClient {
     }
 }
 
-#[derive(Debug)]
 struct Torrent {
     metainfo: MetainfoFile,
     root_name: String,
@@ -151,6 +148,12 @@ struct Torrent {
     num_leachers: usize,
 
     tracker_info: RefCell<TrackerInfo>,
+
+    // event loop specific
+    command_rx: Receiver<Command>,
+    conns: Slab<Connection>,
+    token: Token,
+    events: Events,
 }
 
 #[derive(Debug)]
@@ -173,6 +176,7 @@ impl TrackerInfo {
 #[allow(dead_code)]
 #[derive(Debug)]
 enum Command {
+    ContactTracker,
     StartDownload,
     StartSeed,
     StopDownload,
@@ -181,7 +185,7 @@ enum Command {
 }
 
 impl Torrent {
-    fn new(mut file: fs::File, peer_id: String) -> Torrent {
+    fn new(mut file: File, peer_id: String, rx: Receiver<Command>) -> Torrent {
         // byte vector for metainfo storage
         let mut bytes: Vec<u8> = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -225,6 +229,18 @@ impl Torrent {
             num_leachers: 0,
 
             tracker_info: RefCell::new(TrackerInfo::new()),
+
+            command_rx: rx,
+            // Give our server token a number much larger than our slab capacity. The slab used to
+            // track an internal offset, but does not anymore.
+            token: Token(10_000_000),
+
+            // SERVER is Token(1), so start after that
+            // we can deal with a max of 126 connections
+            conns: Slab::with_capacity(128),
+
+            // list of events from the poller that the server needs to process
+            events: Events::with_capacity(1024),
         }
     }
 
@@ -303,7 +319,196 @@ impl Torrent {
         for file in self.files {
             File::create(file.name);
         }
-	Ok(())
+        Ok(())
+    }
+
+    fn run(&mut self, poll: &mut Poll) -> io::Result<()> {
+
+        try!(self.register(poll));
+
+        info!("Server run loop starting...");
+        loop {
+            let cnt = try!(poll.poll(&mut self.events, None));
+
+            let mut i = 0;
+
+            // trace!("processing events... cnt={}; len={}",
+            //        cnt,
+            //        self.events.len());
+
+            // Iterate over the notifications. Each event provides the token
+            // it was registered with (which usually represents, at least, the
+            // handle that the event is about) as well as information about
+            // what kind of event occurred (readable, writable, signal, etc.)
+            while i < cnt {
+                let event = self.events.get(i).expect("Failed to get event");
+
+                trace!("event={:?}; idx={:?}", event, i);
+                self.ready(poll, event.token(), event.kind());
+
+                i += 1;
+            }
+
+            self.tick(poll);
+        }
+    }
+
+    fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
+        debug!("{:?} event = {:?}", token, event);
+
+        if event.is_error() {
+            warn!("Error event for {:?}", token);
+            self.find_connection_by_token(token).mark_reset();
+            return;
+        }
+
+        if event.is_hup() {
+            trace!("Hup event for {:?}", token);
+            self.find_connection_by_token(token).mark_reset();
+            println!("{:?}: client closed connection", token);
+            return;
+        }
+
+        // We never expect a write event for our `Server` token . A write event for any other token
+        // should be handed off to that connection.
+        if event.is_writable() {
+            trace!("Write event for {:?}", token);
+            assert!(self.token != token, "Received writable event for Server");
+
+            let conn = self.find_connection_by_token(token);
+
+            if conn.is_reset() {
+                info!("{:?} has already been reset", token);
+                return;
+            }
+
+            conn.writable()
+                .unwrap_or_else(|e| {
+                    warn!("Write event failed for {:?}, {:?}", token, e);
+                    conn.mark_reset();
+                });
+        }
+
+        // A read event for our `Server` token means we are establishing a new connection. A read
+        // event for any other token should be handed off to that connection.
+        if event.is_readable() {
+            trace!("Read event for {:?}", token);
+            if self.token == token {
+                self.accept_cmd(poll);
+            } else {
+
+                if self.find_connection_by_token(token).is_reset() {
+                    info!("{:?} has already been reset", token);
+                    return;
+                }
+
+                self.readable(token)
+                    .unwrap_or_else(|e| {
+                        warn!("Read event failed for {:?}: {:?}", token, e);
+                        self.find_connection_by_token(token).mark_reset();
+                    });
+            }
+        }
+
+        if self.token != token {
+            self.find_connection_by_token(token).mark_idle();
+        }
+    }
+
+    fn tick(&mut self, event_loop: &mut Poll) {
+        trace!("Handling end of tick");
+
+        let mut reset_tokens = Vec::new();
+
+        for c in self.conns.iter_mut() {
+            if c.is_reset() {
+                reset_tokens.push(c.token);
+            } else if c.is_idle() {
+                c.reregister(event_loop)
+                    .unwrap_or_else(|e| {
+                        warn!("Reregister failed {:?}", e);
+                        c.mark_reset();
+                        reset_tokens.push(c.token);
+                    });
+            }
+        }
+
+        for token in reset_tokens {
+            match self.conns.remove(token) {
+                Some(_c) => {
+                    debug!("reset connection; token={:?}", token);
+                }
+                None => {
+                    warn!("Unable to remove connection for {:?}", token);
+                }
+            }
+        }
+    }
+
+    fn register(&mut self, poll: &mut Poll) -> io::Result<()> {
+        poll.register(&self.command_rx,
+                      self.token,
+                      Ready::readable(),
+                      PollOpt::edge())
+            .or_else(|e| {
+                error!("Failed to register server {:?}, {:?}", self.token, e);
+                Err(e)
+            })
+    }
+
+    fn accept_cmd(&mut self, poll: &mut Poll) {
+        debug!("server accepting new command");
+
+        let message = self.command_rx.try_recv().unwrap();
+        debug!("{:?}", message);
+        use self::Command::*;
+        match message {
+            StartDownload => {
+                info!("starting download");
+                // TODO register a token for each peer
+                // Handshake sequence, eliminates unhelpful peers
+                // {
+                // let torrent = torrent_ref.lock().unwrap();
+                // let info_hash = torrent.metainfo.info_hash();
+                // let ih_ref = info_hash.as_ref();
+                // let peer_id = &torrent.peer_id;
+                // {
+                // let mut trk_info = torrent.tracker_info.borrow_mut();
+                // let mut active_peers = Vec::new();
+                // let peer_count = trk_info.peers.len();
+                //
+                // for _ in 0..peer_count {
+                // let peer = trk_info.peers.pop().unwrap();
+                // if handshake_peer(&peer, ih_ref, peer_id) {
+                // active_peers.push(peer);
+                // }
+                // }
+                // debug!("active peer count: {}", active_peers.len());
+                // trk_info.peers = active_peers;
+                // }
+                // }
+            }
+            _ => warn!("NOT YET IMPLEMENTED"),
+        }
+    }
+
+    /// Forward a readable event to an established connection.
+    ///
+    /// Connections are identified by the token provided to us from the event loop. Once a read has
+    /// finished, push the receive buffer into the all the existing connections so we can
+    /// broadcast.
+    fn readable(&mut self, token: Token) -> io::Result<()> {
+        debug!("server conn readable; token={:?}", token);
+
+        while let Some(_) = try!(self.find_connection_by_token(token).readable()) {
+            // TODO
+        }
+
+        Ok(())
+    }
+
+    fn find_connection_by_token(&mut self, token: Token) -> &mut Connection {
+        &mut self.conns[token]
     }
 }
 
@@ -457,40 +662,11 @@ fn handshake_peer(peer: &Peer, info_hash: &[u8], peer_id: &str) -> bool {
     }
 }
 
-fn torrent_loop(rx: Receiver<Command>, torrent_ref: Arc<Mutex<Torrent>>) {
+fn torrent_loop(torrent_ref: Arc<Mutex<Torrent>>) {
     debug!("initiating torrent_loop for {:?}",
            torrent_ref.lock().unwrap().root_name);
-    loop {
-        let message = rx.recv().unwrap();
-        debug!("{:?}", message);
-        use self::Command::*;
-        match message {
-            StartDownload => {
-                info!("starting download");
-
-                // Handshake sequence, eliminates unhelpful peers
-                {
-                    let torrent = torrent_ref.lock().unwrap();
-                    let info_hash = torrent.metainfo.info_hash();
-                    let ih_ref = info_hash.as_ref();
-                    let peer_id = &torrent.peer_id;
-                    {
-                        let mut trk_info = torrent.tracker_info.borrow_mut();
-                        let mut active_peers = Vec::new();
-                        let peer_count = trk_info.peers.len();
-
-                        for _ in 0..peer_count {
-                            let peer = trk_info.peers.pop().unwrap();
-                            if handshake_peer(&peer, ih_ref, peer_id) {
-                                active_peers.push(peer);
-                            }
-                        }
-                        debug!("active peer count: {}", active_peers.len());
-                        trk_info.peers = active_peers;
-                    }
-                }
-            }
-            _ => warn!("NOT YET IMPLEMENTED"),
-        }
-    }
+    // Create a polling object that will be used by the Torrent to receive events
+    let mut poll = Poll::new().expect("Failed to create Poll");
+    let mut torrent = torrent_ref.lock().unwrap();
+    torrent.run(&mut poll).expect("Failed to run server");
 }

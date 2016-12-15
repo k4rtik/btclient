@@ -1,8 +1,8 @@
 [package]
 authors = ["Kartik Singhal <kartiksinghal@gmail.com>", "Sumukha TV <tvsumukha@gmail.com>"]
+build = "build.rs"
 name = "btclient"
 version = "0.1.0"
-build = "build.rs"
 
 [build-dependencies]
 pnet_macros = "*"
@@ -17,8 +17,10 @@ chrono = "0.2.25"
 clap = "2.19.2"
 hyper = "0.9.14"
 log = "0.3.6"
+mio = "0.6.1"
 pnet = "*"
 pnet_macros_support = "*"
+slab = "0.3.0"
 url = "1.2.3"
 
 [dependencies.pretty_env_logger]

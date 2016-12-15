@@ -2,6 +2,7 @@
 extern crate log;
 
 extern crate clap;
+extern crate mio;
 extern crate pnet;
 extern crate pnet_macros_support;
 extern crate pretty_env_logger;
@@ -11,6 +12,7 @@ use rustyline::completion::FilenameCompleter;
 use rustyline::error::ReadlineError;
 
 mod btclient;
+mod connection;
 mod packet;
 use btclient::BTClient;
 
