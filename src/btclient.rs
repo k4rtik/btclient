@@ -38,6 +38,7 @@ const BLOCK_SZ: usize = 16384;
 #[allow(dead_code)]
 pub struct BTClient {
     torrents: HashMap<usize, Arc<Mutex<Torrent>>>,
+    torrent_roots: HashMap<usize, String>,
     peer_id: String, // peer_id or client id
     port: u16, // between 6881-6889
     next_id: usize,
@@ -52,6 +53,7 @@ impl BTClient {
         debug!("peer_id: {}", peer_id);
         BTClient {
             torrents: HashMap::new(),
+            torrent_roots: HashMap::new(),
             peer_id: peer_id,
             port: port,
             next_id: 0,
@@ -94,6 +96,8 @@ impl BTClient {
         }
 
         t.files.append(&mut files);
+        self.torrent_roots.insert(self.next_id, t.root_name.clone());
+
         let torrent = Arc::new(Mutex::new(t));
 
         self.torrents.insert(self.next_id, torrent.clone());
@@ -107,16 +111,15 @@ impl BTClient {
 
     pub fn remove(self: &mut BTClient, id: usize) -> Result<usize, String> {
         self.torrents.remove(&id);
+        self.torrent_roots.remove(&id);
+        self.channels.remove(&id);
         Ok(self.torrents.len())
     }
 
     pub fn list(self: &BTClient) -> Vec<(usize, String)> {
-        self.torrents
+        self.torrent_roots
             .iter()
-            .map(|(id, torrent)| {
-                let torrent = torrent.lock().unwrap();
-                (*id, torrent.root_name.clone())
-            })
+            .map(|(id, root_name)| (*id, root_name.clone()))
             .collect()
     }
 
@@ -126,8 +129,7 @@ impl BTClient {
     }
 
     pub fn showfiles(self: &BTClient, id: usize) {
-        let torrent = self.torrents[&id].lock().unwrap();
-        print_file_list(&torrent.metainfo);
+        self.channels[&id].send(Command::ListFiles).unwrap();
     }
 }
 
@@ -177,6 +179,7 @@ impl TrackerInfo {
 #[derive(Debug)]
 enum Command {
     ContactTracker,
+    ListFiles,
     StartDownload,
     StartSeed,
     StopDownload,
