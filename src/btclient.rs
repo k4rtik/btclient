@@ -11,14 +11,21 @@ use self::bip_utracker::contact::CompactPeersV4;
 use self::bit_vec::BitVec;
 use self::chrono::TimeZone;
 
+use pnet::packet::Packet;
+
+use packet::peer_protocol::*;
+
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::prelude::*;
 use std::net::SocketAddrV4;
+use std::net::TcpStream;
+use std::str;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
 const BLOCK_SZ: usize = 16384;
 
@@ -113,7 +120,7 @@ impl BTClient {
         let tracker_info = torrent.contact_tracker(self.port);
         trace!("{:?}", tracker_info);
         debug!("Found {} peers", tracker_info.peers.len());
-        torrent.tracker_info = Some(tracker_info);
+        *torrent.tracker_info.borrow_mut() = tracker_info;
 
         self.channels[&id].send(Command::StartDownload).unwrap();
     }
@@ -141,7 +148,7 @@ struct Torrent {
     num_seeders: usize,
     num_leachers: usize,
 
-    tracker_info: Option<TrackerInfo>,
+    tracker_info: RefCell<TrackerInfo>,
 }
 
 #[derive(Debug)]
@@ -149,6 +156,16 @@ struct TrackerInfo {
     peers: Vec<Peer>,
     interval: usize, // in seconds
     tracker_id: Option<String>,
+}
+
+impl TrackerInfo {
+    fn new() -> TrackerInfo {
+        TrackerInfo {
+            peers: Vec::new(),
+            interval: 0,
+            tracker_id: None,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -205,14 +222,14 @@ impl Torrent {
             num_seeders: 0,
             num_leachers: 0,
 
-            tracker_info: None,
+            tracker_info: RefCell::new(TrackerInfo::new()),
         }
     }
 
     fn contact_tracker(self: &Torrent, port: u16) -> TrackerInfo {
         let metainfo = &self.metainfo;
         let info_hash = metainfo.info_hash();
-        let info_hash_str = unsafe { ::std::str::from_utf8_unchecked(info_hash.as_ref()) };
+        let info_hash_str = unsafe { str::from_utf8_unchecked(info_hash.as_ref()) };
 
         let mut request_url = url::Url::parse(metainfo.main_tracker().unwrap()).unwrap();
         request_url.query_pairs_mut()
@@ -380,9 +397,60 @@ enum EventType {
     Completed,
 }
 
-fn torrent_loop(rx: Receiver<Command>, torrent: Arc<Mutex<Torrent>>) {
+const PSTRLEN: u8 = 19;
+const PSTR: &'static str = "BitTorrent protocol";
+const RESERVED: [u8; 8] = [0u8; 8];
+const HANDSHAKE_LEN: usize = 49 + PSTRLEN as usize;
+
+fn handshake_peer(peer: &Peer, info_hash: &[u8], peer_id: &str) -> bool {
+    let info_hash_str = unsafe { str::from_utf8_unchecked(info_hash) };
+    let mut pkt_buf = vec![0u8; HANDSHAKE_LEN];
+    let mut pkt = MutableHandshakePacket::new(&mut pkt_buf).unwrap();
+    pkt.set_pstrlen(PSTRLEN);
+    pkt.set_pstr(PSTR.as_bytes());
+    pkt.set_reserved(&RESERVED);
+    pkt.set_info_hash(info_hash_str.as_bytes());
+    pkt.set_peer_id(peer_id.as_bytes());
+    trace!("pkt: {:?}", pkt);
+    // XXX: connect() can block everyone else for a minute or more
+    match TcpStream::connect(peer.ip_port) {
+        Ok(mut stream) => {
+            debug!("connect() success: {:?}", peer.ip_port);
+            stream.set_write_timeout(Some(Duration::from_millis(100))).unwrap();
+            match stream.write(pkt.packet()) {
+                Ok(_) => {
+                    debug!("write() success: {:?}", peer.ip_port);
+                    stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+                    let mut buf_read = vec![0; 2048];
+                    match stream.read(&mut buf_read) {
+                        Ok(bytes_read) => {
+                            debug!("read() success: {:?}", peer.ip_port);
+                            debug!("Bytes read: {:?}", bytes_read);
+                            trace!("peer_id: {:?}", String::from_utf8_lossy(&buf_read[0..68]));
+                            str::from_utf8(&buf_read[1..20]).unwrap() == PSTR
+                        }
+                        Err(e) => {
+                            error!("read() failed: {:?} {:?}", peer.ip_port, e);
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("write() failed: {:?} {:?}", peer.ip_port, e);
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            error!("connect() failed: {:?} {:?}", peer.ip_port, e);
+            false
+        }
+    }
+}
+
+fn torrent_loop(rx: Receiver<Command>, torrent_ref: Arc<Mutex<Torrent>>) {
     debug!("initiating torrent_loop for {:?}",
-           torrent.lock().unwrap().root_name);
+           torrent_ref.lock().unwrap().root_name);
     loop {
         let message = rx.recv().unwrap();
         debug!("{:?}", message);
@@ -390,6 +458,28 @@ fn torrent_loop(rx: Receiver<Command>, torrent: Arc<Mutex<Torrent>>) {
         match message {
             StartDownload => {
                 info!("starting download");
+
+                // Handshake sequence, eliminates unhelpful peers
+                {
+                    let torrent = torrent_ref.lock().unwrap();
+                    let info_hash = torrent.metainfo.info_hash();
+                    let ih_ref = info_hash.as_ref();
+                    let peer_id = &torrent.peer_id;
+                    {
+                        let mut trk_info = torrent.tracker_info.borrow_mut();
+                        let mut active_peers = Vec::new();
+                        let peer_count = trk_info.peers.len();
+
+                        for _ in 0..peer_count {
+                            let peer = trk_info.peers.pop().unwrap();
+                            if handshake_peer(&peer, ih_ref, peer_id) {
+                                active_peers.push(peer);
+                            }
+                        }
+                        debug!("active peer count: {}", active_peers.len());
+                        trk_info.peers = active_peers;
+                    }
+                }
             }
             _ => warn!("NOT YET IMPLEMENTED"),
         }
