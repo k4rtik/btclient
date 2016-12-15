@@ -18,6 +18,7 @@ use packet::peer_protocol::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::fs::File;
 use std::io::prelude::*;
 use std::net::SocketAddrV4;
 use std::net::TcpStream;
@@ -122,6 +123,7 @@ impl BTClient {
         debug!("Found {} peers", tracker_info.peers.len());
         *torrent.tracker_info.borrow_mut() = tracker_info;
 
+	//torrent.create_files();
         self.channels[&id].send(Command::StartDownload).unwrap();
     }
 
@@ -295,6 +297,13 @@ impl Torrent {
         } else {
             Err("No more pieces to request!".to_owned())
         }
+    }
+
+    fn create_files(self: Torrent) -> Result<(), String> {
+        for file in self.files {
+            File::create(file.name);
+        }
+	Ok(())
     }
 }
 
