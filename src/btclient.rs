@@ -25,8 +25,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
-use std::net::SocketAddrV4;
-use std::net::TcpStream;
+use std::net::SocketAddr;
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -282,13 +281,12 @@ impl Torrent {
                 .bytes()
                 .unwrap())
             .unwrap();
-        trace!("{:?}", peer_ip_ports);
 
         let mut peers = Vec::new();
         trace!("Peer list received:");
         for ip_port in peer_ip_ports.iter() {
             trace!("{:?}", ip_port);
-            peers.push(Peer::new(ip_port));
+            peers.push(Peer::new(SocketAddr::V4(ip_port)));
         }
 
         let interval = response.dict().unwrap().lookup("interval").unwrap();
@@ -472,6 +470,46 @@ impl Torrent {
             StartDownload => {
                 self.contact_tracker();
                 info!("starting download");
+                let peer_addrs: Vec<SocketAddr> =
+                    self.tracker_info.borrow().peers.iter().map(|peer| peer.ip_port).collect();
+                for addr in peer_addrs {
+                    let stream = match TcpStream::connect(&addr) {
+                        Ok(s) => {
+                            info!("connect() returned for {:?}", addr);
+                            s
+                        }
+                        Err(e) => {
+                            error!("Failed to accept new socket, {:?}", e);
+                            return;
+                        }
+                    };
+
+                    let token = match self.conns.vacant_entry() {
+                        Some(entry) => {
+                            debug!("registering {:?} with poller", entry.index());
+                            let c = Connection::new(stream, entry.index());
+                            entry.insert(c).index()
+                        }
+                        None => {
+                            error!("Failed to insert connection into slab");
+                            return;
+                        }
+                    };
+
+                    {
+                        match self.find_connection_by_token(token).register(poll) {
+                            Ok(_) => {
+                                println!("{:?}: new peer connected; initiating handshake", token);
+                            }
+                            Err(e) => {
+                                error!("Failed to register {:?} connection with poller, {:?}",
+                                       token,
+                                       e);
+                                self.conns.remove(token);
+                            }
+                        }
+                    }
+                }
                 // TODO register a token for each peer
                 // Handshake sequence, eliminates unhelpful peers
                 // {
@@ -577,7 +615,7 @@ struct FileT {
 #[derive(Debug)]
 struct Peer {
     id: Option<String>, // peer_id
-    ip_port: SocketAddrV4,
+    ip_port: SocketAddr,
 
     am_choking: bool,
     peer_choking: bool,
@@ -586,7 +624,7 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(ip_port: SocketAddrV4) -> Peer {
+    fn new(ip_port: SocketAddr) -> Peer {
         Peer {
             id: None,
             ip_port: ip_port,
@@ -634,39 +672,40 @@ fn handshake_peer(peer: &Peer, info_hash: &[u8], peer_id: &str) -> bool {
     pkt.set_peer_id(peer_id.as_bytes());
     trace!("pkt: {:?}", pkt);
     // XXX: connect() can block everyone else for a minute or more
-    match TcpStream::connect(peer.ip_port) {
-        Ok(mut stream) => {
-            debug!("connect() success: {:?}", peer.ip_port);
-            stream.set_write_timeout(Some(Duration::from_millis(100))).unwrap();
-            match stream.write(pkt.packet()) {
-                Ok(_) => {
-                    debug!("write() success: {:?}", peer.ip_port);
-                    stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-                    let mut buf_read = vec![0; 2048];
-                    match stream.read(&mut buf_read) {
-                        Ok(bytes_read) => {
-                            debug!("read() success: {:?}", peer.ip_port);
-                            debug!("Bytes read: {:?}", bytes_read);
-                            trace!("peer_id: {:?}", String::from_utf8_lossy(&buf_read[0..68]));
-                            str::from_utf8(&buf_read[1..20]).unwrap() == PSTR
-                        }
-                        Err(e) => {
-                            error!("read() failed: {:?} {:?}", peer.ip_port, e);
-                            false
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("write() failed: {:?} {:?}", peer.ip_port, e);
-                    false
-                }
-            }
-        }
-        Err(e) => {
-            error!("connect() failed: {:?} {:?}", peer.ip_port, e);
-            false
-        }
-    }
+    // match TcpStream::connect(&peer.ip_port) {
+    // Ok(mut stream) => {
+    // debug!("connect() success: {:?}", peer.ip_port);
+    // stream.set_write_timeout(Some(Duration::from_millis(100))).unwrap();
+    // match stream.write(pkt.packet()) {
+    // Ok(_) => {
+    // debug!("write() success: {:?}", peer.ip_port);
+    // stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    // let mut buf_read = vec![0; 2048];
+    // match stream.read(&mut buf_read) {
+    // Ok(bytes_read) => {
+    // debug!("read() success: {:?}", peer.ip_port);
+    // debug!("Bytes read: {:?}", bytes_read);
+    // trace!("peer_id: {:?}", String::from_utf8_lossy(&buf_read[0..68]));
+    // str::from_utf8(&buf_read[1..20]).unwrap() == PSTR
+    // }
+    // Err(e) => {
+    // error!("read() failed: {:?} {:?}", peer.ip_port, e);
+    // false
+    // }
+    // }
+    // }
+    // Err(e) => {
+    // error!("write() failed: {:?} {:?}", peer.ip_port, e);
+    // false
+    // }
+    // }
+    // }
+    // Err(e) => {
+    // error!("connect() failed: {:?} {:?}", peer.ip_port, e);
+    // false
+    // }
+    // }
+    false
 }
 
 fn torrent_loop(torrent_ref: Arc<Mutex<Torrent>>) {

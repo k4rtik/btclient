@@ -28,12 +28,10 @@ pub struct Connection {
     is_to_be_removed: bool,
 
     handshake_done: bool,
-
-    addr: Ipv4Addr,
 }
 
 impl Connection {
-    pub fn new(sock: TcpStream, token: Token, addr: Ipv4Addr) -> Connection {
+    pub fn new(sock: TcpStream, token: Token) -> Connection {
         Connection {
             sock: sock,
             token: token,
@@ -42,7 +40,6 @@ impl Connection {
             is_reset: false,
             is_to_be_removed: false,
             handshake_done: false,
-            addr: addr,
         }
     }
 
@@ -166,10 +163,5 @@ impl Connection {
     #[inline]
     pub fn is_handshake_done(&self) -> bool {
         self.handshake_done
-    }
-
-    #[inline]
-    pub fn get_addr(&self) -> Ipv4Addr {
-        self.addr
     }
 }
