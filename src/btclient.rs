@@ -64,7 +64,7 @@ impl BTClient {
     pub fn add(self: &mut BTClient, file: File) -> Result<(), String> {
         // TODO check if torrent already exists before insert
         let (tx, rx) = channel();
-        let mut t = Torrent::new(file, self.peer_id.clone(), rx);
+        let mut t = Torrent::new(file, self.peer_id.clone(), self.port, rx);
         let piece_len = t.metainfo.info().piece_length();
         let blocks_count_per_piece = (piece_len as usize) / BLOCK_SZ;
         let total_blocks = (blocks_count_per_piece as usize) *
@@ -124,7 +124,6 @@ impl BTClient {
     }
 
     pub fn start_download(self: &BTClient, id: usize) {
-        self.channels[&id].send(Command::ContactTracker).unwrap();
         self.channels[&id].send(Command::StartDownload).unwrap();
     }
 
@@ -137,6 +136,7 @@ struct Torrent {
     metainfo: MetainfoFile,
     root_name: String,
     peer_id: String,
+    port: u16,
 
     piece_bitmap: BitVec,
     block_bitmap: Vec<BitVec>,
@@ -178,7 +178,6 @@ impl TrackerInfo {
 #[allow(dead_code)]
 #[derive(Debug)]
 enum Command {
-    ContactTracker,
     ListFiles,
     StartDownload,
     StartSeed,
@@ -188,7 +187,7 @@ enum Command {
 }
 
 impl Torrent {
-    fn new(mut file: File, peer_id: String, rx: Receiver<Command>) -> Torrent {
+    fn new(mut file: File, peer_id: String, port: u16, rx: Receiver<Command>) -> Torrent {
         // byte vector for metainfo storage
         let mut bytes: Vec<u8> = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -218,6 +217,7 @@ impl Torrent {
         Torrent {
             metainfo: metainfo,
             peer_id: peer_id,
+            port: port,
             root_name: root_name,
 
             piece_bitmap: BitVec::from_elem(piece_count, false),
@@ -247,7 +247,7 @@ impl Torrent {
         }
     }
 
-    fn contact_tracker(self: &Torrent, port: u16) -> TrackerInfo {
+    fn contact_tracker(self: &mut Torrent) {
         let metainfo = &self.metainfo;
         let info_hash = metainfo.info_hash();
         let info_hash_str = unsafe { str::from_utf8_unchecked(info_hash.as_ref()) };
@@ -256,7 +256,7 @@ impl Torrent {
         request_url.query_pairs_mut()
             .append_pair("info_hash", info_hash_str)
             .append_pair("peer_id", &self.peer_id)
-            .append_pair("port", &port.to_string())
+            .append_pair("port", &self.port.to_string())
             .append_pair("uploaded", &self.uploaded.to_string())
             .append_pair("downloaded", &self.downloaded.to_string())
             .append_pair("left", &self.left.to_string())
@@ -295,7 +295,7 @@ impl Torrent {
         trace!("interval: {:?}", interval);
         let interval: usize = 100;
 
-        TrackerInfo {
+        *self.tracker_info.borrow_mut() = TrackerInfo {
             peers: peers,
             interval: interval,
             tracker_id: None,
@@ -395,7 +395,7 @@ impl Torrent {
         // A read event for our `Server` token means we are establishing a new connection. A read
         // event for any other token should be handed off to that connection.
         if event.is_readable() {
-            trace!("Read event for {:?}", token);
+            debug!("Read event for {:?}", token);
             if self.token == token {
                 self.accept_cmd(poll);
             } else {
@@ -466,7 +466,11 @@ impl Torrent {
         debug!("{:?}", message);
         use self::Command::*;
         match message {
+            ListFiles => {
+                print_file_list(&self.metainfo);
+            }
             StartDownload => {
+                self.contact_tracker();
                 info!("starting download");
                 // TODO register a token for each peer
                 // Handshake sequence, eliminates unhelpful peers
