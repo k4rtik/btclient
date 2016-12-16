@@ -1,7 +1,6 @@
 extern crate bip_metainfo;
 extern crate bip_bencode;
 extern crate bip_utracker;
-extern crate bit_vec;
 extern crate chrono;
 extern crate hyper;
 extern crate url;
@@ -9,9 +8,9 @@ extern crate slab;
 
 use self::bip_metainfo::MetainfoFile;
 use self::bip_utracker::contact::CompactPeersV4;
-use self::bit_vec::BitVec;
 use self::chrono::TimeZone;
 
+use bit_vec::BitVec;
 use mio::*;
 use mio::channel::{Sender, Receiver, channel};
 use mio::tcp::*;
@@ -472,7 +471,7 @@ impl Torrent {
                 info!("starting download");
                 let peer_addrs: Vec<SocketAddr> =
                     self.tracker_info.borrow().peers.iter().map(|peer| peer.ip_port).collect();
-                for addr in peer_addrs {
+                for (idx, addr) in peer_addrs.iter().enumerate() {
                     let stream = match TcpStream::connect(&addr) {
                         Ok(s) => {
                             info!("connect() returned for {:?}", addr);
@@ -514,6 +513,10 @@ impl Torrent {
                     let peer_id = self.peer_id.clone();
                     self.find_connection_by_token(token)
                         .send_handshake(ih_ref, peer_id);
+                    self.find_connection_by_token(token)
+                        .send_interest();
+                    self.find_connection_by_token(token)
+                        .send_piece_request(idx % peer_addrs.len(), 0, BLOCK_SZ);
                 }
             }
             _ => warn!("NOT YET IMPLEMENTED"),
@@ -535,7 +538,11 @@ impl Torrent {
                 2 => info!("INTERESTED"),
                 3 => info!("UNINTERESTED"),
                 4 => info!("HAVE"),
-                5 => info!("BITFIELD {:?}", message),
+                5 => {
+                    info!("BITFIELD {:?}", message);
+                    self.find_connection_by_token(token).piece_bitmap =
+                        BitVec::from_bytes(&message[1..]);
+                }
                 6 => info!("REQUEST {:?}", message),
                 7 => info!("PIECE {:?}", message),
                 8 => info!("CANCEL {:?}", message),
@@ -610,6 +617,7 @@ struct FileT {
 struct Peer {
     id: Option<String>, // peer_id
     ip_port: SocketAddr,
+    piece_bitmap: BitVec,
 
     am_choking: bool,
     peer_choking: bool,
@@ -622,6 +630,8 @@ impl Peer {
         Peer {
             id: None,
             ip_port: ip_port,
+            piece_bitmap: BitVec::new(),
+
             am_choking: true,
             am_interested: false,
             peer_choking: true,

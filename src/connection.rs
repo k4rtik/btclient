@@ -1,3 +1,4 @@
+use std::collections::vec_deque::VecDeque;
 use std::io;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
@@ -5,6 +6,7 @@ use std::net::Ipv4Addr;
 use std::str;
 use std::sync::Arc;
 
+use bit_vec::BitVec;
 use byteorder::{ByteOrder, BigEndian};
 use mio::*;
 use mio::tcp::*;
@@ -44,8 +46,11 @@ pub struct Connection {
     // byte we are supposed to read
     read_continuation: Option<u32>,
 
-    send_queue: Vec<Arc<Vec<u8>>>,
+    send_queue: VecDeque<Arc<Vec<u8>>>,
     write_continuation: bool,
+
+    pub piece_bitmap: BitVec,
+    pub piece_buf: Vec<u8>,
 }
 
 impl Connection {
@@ -59,8 +64,10 @@ impl Connection {
             is_to_be_removed: false,
             handshake_done: false,
             read_continuation: None,
-            send_queue: Vec::new(),
+            send_queue: VecDeque::new(),
             write_continuation: false,
+            piece_bitmap: BitVec::new(),
+            piece_buf: Vec::with_capacity(524288),
         }
     }
 
@@ -178,14 +185,14 @@ impl Connection {
     /// in write events.
     pub fn writable(&mut self) -> io::Result<()> {
         try!(self.send_queue
-            .pop()
+            .pop_front()
             .ok_or(Error::new(ErrorKind::Other, "Could not pop send queue"))
             .and_then(|buf| {
                 /*
                 match self.write_message_length(&buf) {
                     Ok(None) => {
                         // put message back into the queue so we can try again
-                        self.send_queue.push(buf);
+                        self.send_queue.push_back(buf);
                         return Ok(());
                     }
                     Ok(Some(())) => {
@@ -210,7 +217,7 @@ impl Connection {
                             debug!("writable(): client flushing buf; WouldBlock");
 
                             // put message back into the queue so we can try again
-                            self.send_queue.push(buf);
+                            self.send_queue.push_back(buf);
                             self.write_continuation = true;
                             Ok(())
                         } else {
@@ -236,7 +243,7 @@ impl Connection {
     pub fn send_message(&mut self, message: Arc<Vec<u8>>) -> io::Result<()> {
         trace!("connection send_message; token={:?}", self.token);
 
-        self.send_queue.push(message);
+        self.send_queue.push_back(message);
 
         if !self.interest.is_writable() {
             self.interest.insert(Ready::writable());
@@ -259,7 +266,52 @@ impl Connection {
         }
 
         let buf = Arc::new(pkt_buf);
-        self.send_queue.push(buf);
+        self.send_queue.push_back(buf);
+
+        if !self.interest.is_writable() {
+            self.interest.insert(Ready::writable());
+        }
+
+        Ok(())
+    }
+
+    pub fn send_interest(&mut self) -> io::Result<()> {
+        trace!("connection send_interest; token={:?}", self.token);
+        let mut pkt_buf = vec![0u8; 5];
+        {
+            let mut pkt = MutableControlPacket::new(&mut pkt_buf).unwrap();
+            pkt.set_len(1);
+            pkt.set_id(2);
+        }
+
+        let buf = Arc::new(pkt_buf);
+        self.send_queue.push_back(buf);
+
+        if !self.interest.is_writable() {
+            self.interest.insert(Ready::writable());
+        }
+
+        Ok(())
+    }
+
+    pub fn send_piece_request(&mut self,
+                              idx: usize,
+                              begin: usize,
+                              length: usize)
+                              -> io::Result<()> {
+        trace!("connection send_piece_request; token={:?}", self.token);
+        let mut pkt_buf = vec![0u8; 17];
+        {
+            let mut pkt = MutableRequestPacket::new(&mut pkt_buf).unwrap();
+            pkt.set_len(13);
+            pkt.set_id(6);
+            pkt.set_index(idx as u32);
+            pkt.set_begin(begin as u32);
+            pkt.set_length(length as u32);
+        }
+
+        let buf = Arc::new(pkt_buf);
+        self.send_queue.push_back(buf);
 
         if !self.interest.is_writable() {
             self.interest.insert(Ready::writable());
