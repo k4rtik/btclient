@@ -355,7 +355,7 @@ impl Torrent {
     }
 
     fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
-        debug!("{:?} event = {:?}", token, event);
+        trace!("{:?} event = {:?}", token, event);
 
         if event.is_error() {
             warn!("Error event for {:?}", token);
@@ -393,7 +393,7 @@ impl Torrent {
         // A read event for our `Server` token means we are establishing a new connection. A read
         // event for any other token should be handed off to that connection.
         if event.is_readable() {
-            debug!("Read event for {:?}", token);
+            trace!("Read event for {:?}", token);
             if self.token == token {
                 self.accept_cmd(poll);
             } else {
@@ -529,9 +529,20 @@ impl Torrent {
         debug!("server conn readable; token={:?}", token);
 
         while let Some(message) = try!(self.find_connection_by_token(token).readable()) {
-            debug!("message: {:?}", message);
+            match message[0] {
+                0 => info!("CHOKE"),
+                1 => info!("UNCHOKE"),
+                2 => info!("INTERESTED"),
+                3 => info!("UNINTERESTED"),
+                4 => info!("HAVE"),
+                5 => info!("BITFIELD {:?}", message),
+                6 => info!("REQUEST {:?}", message),
+                7 => info!("PIECE {:?}", message),
+                8 => info!("CANCEL {:?}", message),
+                9 => info!("PORT {:?}", message),
+                _ => info!("HANDSHAKE or unknown response {:?}", message),
+            }
         }
-
         Ok(())
     }
 

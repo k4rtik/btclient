@@ -79,7 +79,7 @@ impl Connection {
         };
 
         if msg_len == 0 {
-            debug!("message is zero bytes; token={:?}", self.token);
+            trace!("message is zero bytes; token={:?}", self.token);
             return Ok(None);
         }
 
@@ -197,7 +197,7 @@ impl Connection {
                     }
                 }*/
 
-                debug!("writable(): {:?}", buf);
+                trace!("writable(): {:?}", buf);
 
                 match self.sock.write(&*buf) {
                     Ok(n) => {
