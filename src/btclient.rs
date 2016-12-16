@@ -496,42 +496,25 @@ impl Torrent {
                         }
                     };
 
-                    {
-                        match self.find_connection_by_token(token).register(poll) {
-                            Ok(_) => {
-                                println!("{:?}: new peer connected; initiating handshake", token);
-                            }
-                            Err(e) => {
-                                error!("Failed to register {:?} connection with poller, {:?}",
-                                       token,
-                                       e);
-                                self.conns.remove(token);
-                            }
+                    match self.find_connection_by_token(token).register(poll) {
+                        Ok(_) => {
+                            info!("Successfully registered {:?} with poller", token);
+                        }
+                        Err(e) => {
+                            error!("Failed to register {:?} connection with poller, {:?}",
+                                   token,
+                                   e);
+                            self.conns.remove(token);
+                            continue;
                         }
                     }
+                    println!("{:?}: new peer connected; initiating handshake", token);
+                    let info_hash = self.metainfo.info_hash();
+                    let ih_ref = info_hash.as_ref();
+                    let peer_id = self.peer_id.clone();
+                    self.find_connection_by_token(token)
+                        .send_handshake(ih_ref, peer_id);
                 }
-                // TODO register a token for each peer
-                // Handshake sequence, eliminates unhelpful peers
-                // {
-                // let torrent = torrent_ref.lock().unwrap();
-                // let info_hash = torrent.metainfo.info_hash();
-                // let ih_ref = info_hash.as_ref();
-                // let peer_id = &torrent.peer_id;
-                // {
-                // let mut trk_info = torrent.tracker_info.borrow_mut();
-                // let mut active_peers = Vec::new();
-                // let peer_count = trk_info.peers.len();
-                //
-                // for _ in 0..peer_count {
-                // let peer = trk_info.peers.pop().unwrap();
-                // if handshake_peer(&peer, ih_ref, peer_id) {
-                // active_peers.push(peer);
-                // }
-                // }
-                // debug!("active peer count: {}", active_peers.len());
-                // trk_info.peers = active_peers;
-                // }
-                // }
             }
             _ => warn!("NOT YET IMPLEMENTED"),
         }
@@ -545,8 +528,8 @@ impl Torrent {
     fn readable(&mut self, token: Token) -> io::Result<()> {
         debug!("server conn readable; token={:?}", token);
 
-        while let Some(_) = try!(self.find_connection_by_token(token).readable()) {
-            // TODO
+        while let Some(message) = try!(self.find_connection_by_token(token).readable()) {
+            debug!("message: {:?}", message);
         }
 
         Ok(())
@@ -654,58 +637,6 @@ enum EventType {
     Started,
     Stopped,
     Completed,
-}
-
-const PSTRLEN: u8 = 19;
-const PSTR: &'static str = "BitTorrent protocol";
-const RESERVED: [u8; 8] = [0u8; 8];
-const HANDSHAKE_LEN: usize = 49 + PSTRLEN as usize;
-
-fn handshake_peer(peer: &Peer, info_hash: &[u8], peer_id: &str) -> bool {
-    let info_hash_str = unsafe { str::from_utf8_unchecked(info_hash) };
-    let mut pkt_buf = vec![0u8; HANDSHAKE_LEN];
-    let mut pkt = MutableHandshakePacket::new(&mut pkt_buf).unwrap();
-    pkt.set_pstrlen(PSTRLEN);
-    pkt.set_pstr(PSTR.as_bytes());
-    pkt.set_reserved(&RESERVED);
-    pkt.set_info_hash(info_hash_str.as_bytes());
-    pkt.set_peer_id(peer_id.as_bytes());
-    trace!("pkt: {:?}", pkt);
-    // XXX: connect() can block everyone else for a minute or more
-    // match TcpStream::connect(&peer.ip_port) {
-    // Ok(mut stream) => {
-    // debug!("connect() success: {:?}", peer.ip_port);
-    // stream.set_write_timeout(Some(Duration::from_millis(100))).unwrap();
-    // match stream.write(pkt.packet()) {
-    // Ok(_) => {
-    // debug!("write() success: {:?}", peer.ip_port);
-    // stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-    // let mut buf_read = vec![0; 2048];
-    // match stream.read(&mut buf_read) {
-    // Ok(bytes_read) => {
-    // debug!("read() success: {:?}", peer.ip_port);
-    // debug!("Bytes read: {:?}", bytes_read);
-    // trace!("peer_id: {:?}", String::from_utf8_lossy(&buf_read[0..68]));
-    // str::from_utf8(&buf_read[1..20]).unwrap() == PSTR
-    // }
-    // Err(e) => {
-    // error!("read() failed: {:?} {:?}", peer.ip_port, e);
-    // false
-    // }
-    // }
-    // }
-    // Err(e) => {
-    // error!("write() failed: {:?} {:?}", peer.ip_port, e);
-    // false
-    // }
-    // }
-    // }
-    // Err(e) => {
-    // error!("connect() failed: {:?} {:?}", peer.ip_port, e);
-    // false
-    // }
-    // }
-    false
 }
 
 fn torrent_loop(torrent_ref: Arc<Mutex<Torrent>>) {

@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+extern crate byteorder;
 extern crate clap;
 extern crate mio;
 extern crate pnet;
