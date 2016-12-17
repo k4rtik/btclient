@@ -1,18 +1,16 @@
-use std::collections::vec_deque::VecDeque;
-use std::io;
-use std::io::prelude::*;
-use std::io::{Error, ErrorKind};
-use std::net::Ipv4Addr;
-use std::str;
-use std::sync::Arc;
-
 use bit_vec::BitVec;
 use byteorder::{ByteOrder, BigEndian};
 use mio::*;
 use mio::tcp::*;
-use pnet::packet::Packet;
 
 use packet::peer_protocol::*;
+
+use std::collections::vec_deque::VecDeque;
+use std::io::prelude::*;
+use std::io::{Error, ErrorKind};
+use std::io;
+use std::str;
+use std::sync::Arc;
 
 const PSTRLEN: u8 = 19;
 const PSTR: &'static str = "BitTorrent protocol";
@@ -38,8 +36,6 @@ pub struct Connection {
     // track whether a connection is reset
     is_reset: bool,
 
-    is_to_be_removed: bool,
-
     handshake_done: bool,
 
     // track whether a read received `WouldBlock` and store the number of
@@ -61,7 +57,6 @@ impl Connection {
             interest: Ready::hup(),
             is_idle: true,
             is_reset: false,
-            is_to_be_removed: false,
             handshake_done: false,
             read_continuation: None,
             send_queue: VecDeque::new(),
@@ -383,25 +378,9 @@ impl Connection {
         self.is_idle
     }
 
-    pub fn mark_to_be_removed(&mut self) {
-        trace!("connection mark_to_be_removed; token={:?}", self.token);
-
-        self.is_to_be_removed = true;
-    }
-
-    #[inline]
-    pub fn is_to_be_removed(&self) -> bool {
-        self.is_to_be_removed
-    }
-
     pub fn mark_handshake_done(&mut self) {
         trace!("connection handshake_done; token={:?}", self.token);
 
         self.handshake_done = true;
-    }
-
-    #[inline]
-    pub fn is_handshake_done(&self) -> bool {
-        self.handshake_done
     }
 }

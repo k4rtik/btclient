@@ -1,10 +1,10 @@
-extern crate bip_metainfo;
 extern crate bip_bencode;
+extern crate bip_metainfo;
 extern crate bip_utracker;
 extern crate chrono;
 extern crate hyper;
-extern crate url;
 extern crate slab;
+extern crate url;
 
 use self::bip_metainfo::MetainfoFile;
 use self::bip_utracker::contact::CompactPeersV4;
@@ -14,9 +14,7 @@ use bit_vec::BitVec;
 use mio::*;
 use mio::channel::{Sender, Receiver, channel};
 use mio::tcp::*;
-use pnet::packet::Packet;
 
-use packet::peer_protocol::*;
 use connection::Connection;
 
 use std::cell::RefCell;
@@ -28,7 +26,7 @@ use std::net::SocketAddr;
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type Slab<T> = slab::Slab<T, Token>;
 const BLOCK_SZ: usize = 16384;
@@ -130,6 +128,7 @@ impl BTClient {
     }
 }
 
+#[allow(dead_code)]
 struct Torrent {
     metainfo: MetainfoFile,
     root_name: String,
@@ -299,12 +298,14 @@ impl Torrent {
         }
     }
 
+    #[allow(dead_code)]
     fn get_block_num(self: &mut Torrent, piece_num: usize) -> Result<usize, String> {
         let block = &self.block_bitmap[piece_num];
         let pos = block.iter().position(|x| !x).unwrap();
         Ok(pos)
     }
 
+    #[allow(dead_code)]
     fn get_piece_num(self: &mut Torrent) -> Result<usize, String> {
         if self.piece_nxt_req <= self.metainfo.info().pieces().count() {
             let piece_num = self.piece_nxt_req;
@@ -315,9 +316,10 @@ impl Torrent {
         }
     }
 
+    #[allow(dead_code)]
     fn create_files(self: Torrent) -> Result<(), String> {
         for file in self.files {
-            File::create(file.name);
+            File::create(file.name).unwrap();
         }
         Ok(())
     }
@@ -472,7 +474,7 @@ impl Torrent {
                 let peer_addrs: Vec<SocketAddr> =
                     self.tracker_info.borrow().peers.iter().map(|peer| peer.ip_port).collect();
                 for (idx, addr) in peer_addrs.iter().enumerate() {
-                    let stream = match TcpStream::connect(&addr) {
+                    let stream = match TcpStream::connect(addr) {
                         Ok(s) => {
                             info!("connect() returned for {:?}", addr);
                             s
@@ -512,11 +514,14 @@ impl Torrent {
                     let ih_ref = info_hash.as_ref();
                     let peer_id = self.peer_id.clone();
                     self.find_connection_by_token(token)
-                        .send_handshake(ih_ref, peer_id);
+                        .send_handshake(ih_ref, peer_id)
+                        .unwrap();
                     self.find_connection_by_token(token)
-                        .send_interest();
+                        .send_interest()
+                        .unwrap();
                     self.find_connection_by_token(token)
-                        .send_piece_request(idx % peer_addrs.len(), 0, BLOCK_SZ);
+                        .send_piece_request(idx % peer_addrs.len(), 0, BLOCK_SZ)
+                        .unwrap();
                 }
             }
             _ => warn!("NOT YET IMPLEMENTED"),
